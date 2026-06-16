@@ -15,6 +15,39 @@ LED = Pin(25, Pin.OUT)
 NUM_LEDS = 8
 ledstrip = NeoPixel(Pin(4), NUM_LEDS)
 
+# BUZZER SETUP
+buzzer = PWM(Pin(13), freq=440, duty=0)
+
+# Note frequencies (Hz)
+NOTES = {
+    'C4': 262, 'D4': 294, 'E4': 330, 'F4': 349, 'G4': 392, 'A4': 440, 'B4': 494,
+    'C5': 523, 'D5': 587, 'E5': 659, 'F5': 698, 'G5': 784, 'A5': 880, 'B5': 988,
+    'C6': 1047,
+    'Gs4': 415, 'As4': 466, 'Cs5': 554, 'Ds5': 622, 'Fs5': 740, 'Gs5': 831,
+    'REST': 0,
+}
+
+# --- MELODIES ---
+mario_theme = [
+    ('E5', 0.12), ('E5', 0.12), ('REST', 0.12), ('E5', 0.12),
+    ('REST', 0.12), ('C5', 0.12), ('E5', 0.12),
+    ('G5', 0.12), ('REST', 0.36), ('G4', 0.12), ('REST', 0.36),
+    ('C5', 0.18), ('REST', 0.12), ('G4', 0.18), ('REST', 0.12),
+    ('E4', 0.18), ('REST', 0.12), ('A4', 0.15), ('B4', 0.15),
+    ('As4', 0.10), ('A4', 0.18), ('G4', 0.12), ('E5', 0.12),
+    ('G5', 0.12), ('A5', 0.18), ('F5', 0.10), ('G5', 0.12),
+    ('REST', 0.12), ('E5', 0.15), ('C5', 0.10), ('D5', 0.10),
+    ('B4', 0.18), ('REST', 0.18)
+]
+
+champions_theme = [
+    ('E5', 0.3), ('F5', 0.3), ('E5', 0.3), ('C5', 0.4), ('A4', 0.6), ('REST', 0.2),
+    ('D5', 0.3), ('E5', 0.3), ('D5', 0.3), ('A4', 0.4), ('G4', 0.6), ('REST', 0.2),
+    ('E5', 0.3), ('F5', 0.3), ('E5', 0.3), ('C5', 0.4), ('A4', 0.4),
+    ('A4', 0.2), ('D5', 0.4), ('C5', 0.2), ('D5', 0.4), ('E5', 0.2), ('F5', 0.8),
+    ('REST', 0.5)
+]
+
 # --- MANUAL TESTING FUNCTIONS ---
 def move_forwards():
     motor_fwd.duty(1023)
@@ -77,6 +110,7 @@ class BLE:
         motor_fwd.duty(0)
         motor_rev.duty(0)
         servo.duty(75)
+        buzzer.duty(0) # Silence buzzer on disconnect
 
         self.timer1.init(period=1000, mode=Timer.PERIODIC, callback=lambda t: self.led.value(1))
         sleep_ms(100)
@@ -105,13 +139,11 @@ class BLE:
                 self.led.value(not self.led.value())
                 self.send("led" + str(self.led.value()))
             else:
-                # 1. Win State Tracking (Requires the 'else' so it stops when you let go)
                 if "W" in message:
                     win_state = "W"
                 else:
                     win_state = ""
 
-                # 2. Throttle Control
                 if "F" in message:
                     motor_fwd.duty(1023)
                     motor_rev.duty(0)
@@ -125,7 +157,6 @@ class BLE:
                     motor_rev.duty(0)
                     drive_state = "S"
 
-                # 3. Steering Control
                 if "L" in message:
                     servo.duty(90)
                     steer_state = "L"
@@ -163,76 +194,112 @@ class BLE:
 # --- STARTUP ---
 ble = BLE("HANSEL LOOK AT THIS")
 
+# Animation Trackers
 last_update = ticks_ms()
 anim_frame = 0
 conn_flash_count = 0
+
+# Audio Trackers
+current_song = None
+song_index = 0
+buzzer_last_update = ticks_ms()
+buzzer_wait_time = 0
+buzzer_phase = "GAP" # "PLAYING" or "GAP"
 
 running = True
 while running:
     current_time = ticks_ms()
 
-    # Tick the animation forward every 150 milliseconds
+    # ==========================================
+    # 1. THE NON-BLOCKING AUDIO ENGINE
+    # ==========================================
+    target_song = None
+    if win_state == "W":
+        target_song = champions_theme
+    elif drive_state == "F":
+        target_song = mario_theme
+
+    if target_song != current_song:
+        current_song = target_song
+        song_index = 0
+        buzzer_phase = "GAP"
+        buzzer_wait_time = 0
+        buzzer.duty(0)
+
+    if current_song is not None:
+        if ticks_diff(current_time, buzzer_last_update) >= buzzer_wait_time:
+            if buzzer_phase == "GAP":
+                if song_index >= len(current_song):
+                    song_index = 0
+
+                note, dur = current_song[song_index]
+                buzzer_wait_time = int(dur * 1000)
+
+                if note == 'REST' or NOTES[note] == 0:
+                    buzzer.duty(0)
+                else:
+                    buzzer.freq(NOTES[note])
+                    buzzer.duty(512)
+
+                buzzer_phase = "PLAYING"
+                buzzer_last_update = current_time
+
+            elif buzzer_phase == "PLAYING":
+                buzzer.duty(0)
+                buzzer_wait_time = 30
+                buzzer_phase = "GAP"
+                song_index += 1
+                buzzer_last_update = current_time
+
+    # ==========================================
+    # 2. THE NON-BLOCKING ANIMATION ENGINE
+    # ==========================================
     if ticks_diff(current_time, last_update) >= 150:
         last_update = current_time
 
-        # SCENARIO A: Disconnected (Pulse Blue)
         if ble_status == 0:
             anim_frame = (anim_frame + 1) % 2
             color = (0, 0, 25) if anim_frame == 0 else (0, 0, 0)
-            for i in range(NUM_LEDS):
-                ledstrip[i] = color
+            for i in range(NUM_LEDS): ledstrip[i] = color
             ledstrip.write()
 
-        # SCENARIO B: Just Connected (Flash Green 3 Times)
         elif ble_status == 1:
             conn_flash_count += 1
             color = (0, 25, 0) if conn_flash_count % 2 != 0 else (0, 0, 0)
-            for i in range(NUM_LEDS):
-                ledstrip[i] = color
+            for i in range(NUM_LEDS): ledstrip[i] = color
             ledstrip.write()
 
             if conn_flash_count >= 6:
                 ble_status = 2
                 conn_flash_count = 0
 
-        # SCENARIO C: Normal Driving Operations
         elif ble_status == 2:
-
-            # --- THE WINNING OVERRIDE ---
             if win_state == "W":
-                # Instantly generates a new random color frame every 150ms!
                 for i in range(NUM_LEDS):
-                    colour = random.randint(1,4)
-                    if colour == 1: # RED
-                        ledstrip[i] = (random.randint(100,200),random.randint(0,75),random.randint(0,75))
-                    elif colour == 2: # GREEN
-                        ledstrip[i] = (random.randint(0,75),random.randint(100,200),random.randint(0,75))
-                    elif colour == 3: # BLUE
-                        ledstrip[i] = (random.randint(0,75),random.randint(0,75),random.randint(100,200))
-
-
-            # --- NORMAL DRIVING LIGHTS ---
+                    colour = random.randint(1, 4)
+                    if colour == 1:
+                        ledstrip[i] = (random.randint(100,200), random.randint(0,75), random.randint(0,75))
+                    elif colour == 2:
+                        ledstrip[i] = (random.randint(0,75), random.randint(100,200), random.randint(0,75))
+                    elif colour == 3:
+                        ledstrip[i] = (random.randint(0,75), random.randint(0,75), random.randint(100,200))
+                    elif colour == 4:
+                        ledstrip[i] = (0, 0, 0) # Added safety fallback to prevent errors
             else:
-                # Layer 1: Throttle Base Lights
                 if drive_state == "B":
                     for i in range(NUM_LEDS): ledstrip[i] = (25, 0, 0)
                 else:
                     for i in range(NUM_LEDS): ledstrip[i] = (0, 0, 0)
 
-                # Layer 2: Animated Turn Signals
                 if steer_state == "L":
                     anim_frame = (anim_frame + 1) % 5
                     if anim_frame < 4:
-                        for j in range(anim_frame + 1):
-                            ledstrip[3 - j] = (25, 25, 0)
-
+                        for j in range(anim_frame + 1): ledstrip[3 - j] = (25, 25, 0)
                 elif steer_state == "R":
                     anim_frame = (anim_frame + 1) % 5
                     if anim_frame < 4:
-                        for j in range(anim_frame + 1):
-                            ledstrip[4 + j] = (25, 25, 0)
+                        for j in range(anim_frame + 1): ledstrip[4 + j] = (25, 25, 0)
 
-            # Write whatever colors were chosen to the strip
             ledstrip.write()
 
     sleep_ms(10)
